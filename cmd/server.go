@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/pprof"
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/TierMobility/boring-registry/pkg/auth"
+	"github.com/TierMobility/boring-registry/pkg/discovery"
 	"github.com/TierMobility/boring-registry/pkg/module"
 	"github.com/TierMobility/boring-registry/pkg/provider"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -45,6 +47,14 @@ var (
 	flagTLSKeyFile          string
 	flagListenAddr          string
 	flagTelemetryListenAddr string
+
+	// Login options.
+	flagLoginClient     string
+	flagLoginScopes     []string
+	flagLoginGrantTypes []string
+	flagLoginAuthz      string
+	flagLoginToken      string
+	flagLoginPorts      []int
 )
 
 var serverCmd = &cobra.Command{
@@ -183,14 +193,62 @@ func init() {
 	serverCmd.Flags().StringVar(&flagTLSCertFile, "tls-cert-file", "", "TLS certificate to serve")
 	serverCmd.Flags().StringVar(&flagListenAddr, "listen-address", ":5601", "Address to listen on")
 	serverCmd.Flags().StringVar(&flagTelemetryListenAddr, "listen-telemetry-address", ":7801", "Telemetry address to listen on")
+
+	// Login options.
+	serverCmd.Flags().StringVar(&flagLoginClient, "login-client", "", "The client_id value to use when making requests")
+	serverCmd.Flags().StringSliceVar(&flagLoginGrantTypes, "login-grant-types", []string{}, "An array describing a set of OAuth 2.0 grant types")
+	serverCmd.Flags().StringVar(&flagLoginAuthz, "login-authz", "", "The server's authorization endpoint")
+	serverCmd.Flags().StringVar(&flagLoginToken, "login-token", "", "The server's token endpoint")
+	serverCmd.Flags().IntSliceVar(&flagLoginPorts, "login-ports", []int{}, "A two-element JSON array giving an inclusive range of TCP ports")
+	serverCmd.Flags().StringSliceVar(&flagLoginScopes, "login-scopes", []string{}, "List of scopes")
 }
 
 func serveMux() (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 
+	options := []discovery.Option{
+		discovery.WithModulesV1(fmt.Sprintf("%s/", prefixModules)),
+		discovery.WithProvidersV1(fmt.Sprintf("%s/", prefixProviders)),
+	}
+
+	if flagLoginClient != "" {
+		login := &discovery.LoginV1{
+			Client: flagLoginClient,
+		}
+
+		if flagLoginGrantTypes != nil {
+			login.GrantTypes = flagLoginGrantTypes
+		}
+
+		if flagLoginAuthz != "" {
+			login.Authz = flagLoginAuthz
+		}
+
+		if flagLoginToken != "" {
+			login.Token = flagLoginToken
+		}
+
+		if flagLoginPorts != nil {
+			login.Ports = flagLoginPorts
+		}
+
+		if flagLoginScopes != nil {
+			login.Scopes = flagLoginScopes
+		}
+
+		options = append(options, discovery.WithLoginV1(login))
+	}
+
+	disco := discovery.New(options...)
+
+	discoBody, err := json.Marshal(disco)
+	if err != nil {
+		return nil, err
+	}
+
 	mux.HandleFunc("/.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-type", "application/json")
-		w.Write([]byte(fmt.Sprintf(`{"modules.v1": "%s/", "providers.v1": "%s/"}`, prefixModules, prefixProviders)))
+		w.Write(discoBody)
 	})
 
 	registerMetrics(mux)
